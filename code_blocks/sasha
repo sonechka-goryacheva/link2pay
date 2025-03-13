@@ -1,0 +1,100 @@
+#include <iostream>
+
+
+int main() {
+
+    TgBot::Bot bot("7692132939:AAEJGcCbjsajq7YDzhJ4bOGjQcAcaAh-658");
+    char* messageError = NULL;
+    int exit = 0;
+
+    // Обработчик команды /start
+    bot.getEvents().onCommand("start", [&bot](TgBot::Message::Ptr message) {
+        // Создаем клавиатуру для запроса номера телефона
+        auto keyboard = std::make_shared<TgBot::ReplyKeyboardMarkup>();
+        TgBot::KeyboardButton::Ptr button(new TgBot::KeyboardButton);
+        button->text = "Отправить номер телефона";
+        button->requestContact = true;
+        std::vector<TgBot::KeyboardButton::Ptr> row = {button};
+        keyboard->keyboard.push_back(row);
+
+        // Отправляем приветственное сообщение с клавиатурой
+        bot.getApi().sendMessage(message->chat->id, "Добро пожаловать в Link2Pay!\n\nЧтобы продолжить, необходимо дать согласие на обработку персональных данных.", nullptr, 0, keyboard);
+    });
+
+    // Обработчик любого сообщения с контактом
+    bot.getEvents().onAnyMessage([&bot](TgBot::Message::Ptr message) {
+        static std::string phoneNumber; // Сохраняем номер телефона для повторного использования
+
+        if (message->contact != nullptr) {
+            phoneNumber = message->contact->phoneNumber;
+
+            // Создаем inline-клавиатуру с кнопками "Да" и "Нет"
+            auto inlineKeyboard = std::make_shared<TgBot::InlineKeyboardMarkup>();
+            TgBot::InlineKeyboardButton::Ptr yesButton(new TgBot::InlineKeyboardButton);
+            yesButton->text = "Да";
+            yesButton->callbackData = "confirm_phone:" + phoneNumber; // Добавляем номер телефона в callbackData
+
+            TgBot::InlineKeyboardButton::Ptr noButton(new TgBot::InlineKeyboardButton);
+            noButton->text = "Нет";
+            noButton->callbackData = "request_manual_phone"; // Запрос на ручной ввод номера
+
+            std::vector<TgBot::InlineKeyboardButton::Ptr> row = {yesButton, noButton};
+            inlineKeyboard->inlineKeyboard.push_back(row);
+
+            // Отправляем сообщение с inline-клавиатурой
+            bot.getApi().sendMessage(message->chat->id, "Ваш счёт привязан к этому номеру телефона?: " + phoneNumber, nullptr, 0, inlineKeyboard);
+        } else if (message->text == "Нет") {
+            // Если пользователь вручную ввел "Нет", запрашиваем номер телефона
+            bot.getApi().sendMessage(message->chat->id, "Пожалуйста, введите ваш номер телефона вручную:");
+        } else if ((message->text.find("+") == 0) || (message->text.find("7") == 0) || (message->text.find("8") == 0)) {
+            // Если пользователь ввел номер телефона (начинается с +), сохраняем его
+            phoneNumber = message->text;
+            auto inlineKeyboard = std::make_shared<TgBot::InlineKeyboardMarkup>();
+                        TgBot::InlineKeyboardButton::Ptr yesButton(new TgBot::InlineKeyboardButton);
+                        yesButton->text = "Да";
+                        yesButton->callbackData = "confirm_phone:" + phoneNumber; // Добавляем номер телефона в callbackData
+            
+                        TgBot::InlineKeyboardButton::Ptr noButton(new TgBot::InlineKeyboardButton);
+                        noButton->text = "Нет";
+                        noButton->callbackData = "request_manual_phone"; // Запрос на ручной ввод номера
+            
+                        std::vector<TgBot::InlineKeyboardButton::Ptr> row = {yesButton, noButton};
+                        inlineKeyboard->inlineKeyboard.push_back(row);
+            
+                        // Отправляем сообщение с inline-клавиатурой
+                        bot.getApi().sendMessage(message->chat->id, "Ваш счёт привязан к этому номеру телефона?: " + phoneNumber, nullptr, 0, inlineKeyboard);
+                    }
+                });
+            
+                // Обработчик callback-запросов
+                bot.getEvents().onCallbackQuery([&bot](TgBot::CallbackQuery::Ptr query) {
+                    if (query->data.find("confirm_phone:") == 0) {
+                        // Извлекаем номер телефона из callbackData
+                        std::string phoneNumber = query->data.substr(std::string("confirm_phone:").length());
+            
+                        // Отправляем сообщение с подтверждением
+                        bot.getApi().sendMessage(query->message->chat->id, "Номер телефона подтверждён: " + phoneNumber);
+            
+                        // Уведомляем пользователя о успешном подтверждении
+                        bot.getApi().answerCallbackQuery(query->id, "Номер телефона подтверждён!");
+                    } else if (query->data == "request_manual_phone") {
+                        // Если нажата кнопка "Нет", запрашиваем ручной ввод номера
+                        bot.getApi().sendMessage(query->message->chat->id, "Пожалуйста, введите ваш номер телефона вручную:");
+            
+                        // Уведомляем пользователя о запросе
+                        bot.getApi().answerCallbackQuery(query->id, "Введите номер телефона вручную.");
+                    }
+                });
+            
+                try {
+                        printf("Bot username: %s\n", bot.getApi().getMe()->username.c_str());
+                        TgBot::TgLongPoll longPoll(bot);
+                        while (true) {
+                            printf("Long poll started\n");
+                            longPoll.start();
+                        }
+                    } catch (TgBot::TgException& e) {
+                        printf("error: %s\n", e.what());
+                    }
+                return 0;
+            }
