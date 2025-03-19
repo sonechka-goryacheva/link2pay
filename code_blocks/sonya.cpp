@@ -22,7 +22,7 @@ struct metadata {
 
 };
 
-map <string, metadata> tg_id;// = {"@Sonechka15", metadata{1435929932, "88005553535"}};
+map <string, metadata> tg_id;// = {"", metadata{1435929932, ""}};
 map <int64_t, string> id_tg;
 
 
@@ -31,7 +31,7 @@ bool isRegistered(int64_t chatId) {
 }
 
 int main() {
-    TgBot::Bot bot("7338207341:AAE2s1IPbp0YL6A16qHMRQIUn2nExzej6SU");
+    TgBot::Bot bot("");
 
     bot.getEvents().onCommand("start", [&bot](Message::Ptr message) {
         if (message) {
