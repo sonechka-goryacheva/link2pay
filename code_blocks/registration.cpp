@@ -61,7 +61,7 @@ bool isValidPhoneNumberTGSend(const string &phoneNumber) {
 
 int main() {
     // Создаем объект бота с вашим токеном
-    Bot bot("7980750125:AAHZgBqELthMbEC6OxqH4z-3arcc7hvkRhk");
+    Bot bot("BOT_TOKEN");
 
     // Хранилище данных пользователей
     map<int64_t, UserData> users;
