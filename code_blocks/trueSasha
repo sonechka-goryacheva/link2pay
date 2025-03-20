@@ -4,7 +4,7 @@
 
 int main() {
 
-    TgBot::Bot bot("7692132939:AAEJGcCbjsajq7YDzhJ4bOGjQcAcaAh-658");
+    TgBot::Bot bot("BOT_TOKEN");
     char* messageError = NULL;
     int exit = 0;
 
