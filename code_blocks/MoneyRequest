@@ -208,7 +208,7 @@ bool isValidPhoneNumberTGSend(const string &phoneNumber) {
 
 
 int main() {
-    TgBot::Bot bot("7692132939:AAEJGcCbjsajq7YDzhJ4bOGjQcAcaAh-658");
+    TgBot::Bot bot("BOT_IP");
     map<int64_t, UserData> users;
 
     /*bot.getEvents().onCommand("start", [&bot](Message::Ptr message) {
