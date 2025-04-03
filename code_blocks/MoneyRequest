@@ -216,11 +216,7 @@ string urlEncode(const string& value) {
 }
 
 string generatePaymentLink(const string& payer, const string& amount, const string& paymentDetails) {
-    string baseUrl = "https://your-payment-gateway.com/create_payment";
-    string link = baseUrl +
-        "?recipient=" + urlEncode(payer) +
-        "&amount=" + urlEncode(amount) +
-        "&details=" + urlEncode(paymentDetails);
+    string link = "https://your-payment-gateway.com/create_payment";
     return link;
 }
 
@@ -274,7 +270,7 @@ int main() {
         if (query->data == "request_money") {
             requestMoneyDataMap[chatId] = RequestMoneyData();
             requestMoneyDataMap[chatId].setState(RequestMoneyData::WaitingForRecipient);
-            bot.getApi().sendMessage(chatId, "Введите имя плательщика (например, @username):");
+            bot.getApi().sendMessage(chatId, "Введите тэг плательщика/ов (например, @username):");
             bot.getApi().deleteMessage(query->message->chat->id, query->message->messageId);
         }
         else if (query->data == "no_message") {
@@ -412,7 +408,7 @@ int main() {
         }
         else if (query->data == "change_send") {
             requestMoneyDataMap.erase(chatId);
-            bot.getApi().sendMessage(chatId, "Отправка отменена. Введите заново имя отправителя (например, @username):");
+            bot.getApi().sendMessage(chatId, "Отправка отменена. Введите заново имя плательщика/ов (например, @username):");
             requestMoneyDataMap[chatId] = RequestMoneyData();
             requestMoneyDataMap[chatId].setState(RequestMoneyData::WaitingForRecipient);
         }
@@ -451,7 +447,7 @@ int main() {
             RequestMoneyData &data = requestMoneyDataMap[chatId];
             if (data.getState() == RequestMoneyData::WaitingForRecipient) {
                 if (text.empty() || text[0] != '@') {
-                    bot.getApi().sendMessage(chatId, "Некорректный ввод. Введите имя отправителя, начиная с '@'.");
+                    bot.getApi().sendMessage(chatId, "Некорректный ввод. Введите имя плательщика/ов, начиная с '@'.");
                     return;
                 }
                 data.setPayer(text);
@@ -505,7 +501,7 @@ int main() {
                 if (tg_id.find(data.getPayer()) != tg_id.end()) {
                     data.setState(RequestMoneyData::WaitingForConfirmation);
                     string confirmationText = "Проверьте данные:\n\n" +
-                        string("Отправитель: ") + data.getPayer() + "\n" +
+                        string("Плательщик: ") + data.getPayer() + "\n" +
                         "Сумма: " + data.getAmount();
                     if (!data.getMessage().empty()) {
                         confirmationText += "\nСообщение: " + data.getMessage();
