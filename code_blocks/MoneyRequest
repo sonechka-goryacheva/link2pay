@@ -240,7 +240,7 @@ vector<string> extractUsernames(const string& text) {
 }
 
 int main() {
-    Bot bot("BOT_TOKEN");
+    Bot bot("7692132939:AAEJGcCbjsajq7YDzhJ4bOGjQcAcaAh-658");
 
     map<int64_t, UserData> users;
 
@@ -498,14 +498,11 @@ int main() {
             }
             else if (data.getState() == RequestMoneyData::WaitingForMessage) {
                 data.setMessage(text);
-                if (tg_id.find(data.getPayer()) != tg_id.end()) {
                     data.setState(RequestMoneyData::WaitingForConfirmation);
                     string confirmationText = "Проверьте данные:\n\n" +
                         string("Плательщик: ") + data.getPayer() + "\n" +
                         "Сумма: " + data.getAmount();
-                    if (!data.getMessage().empty()) {
                         confirmationText += "\nСообщение: " + data.getMessage();
-                    }
                     auto confirmKeyboard = make_shared<InlineKeyboardMarkup>();
                     InlineKeyboardButton::Ptr confirmBtn(new InlineKeyboardButton);
                     confirmBtn->text = "Подтвердить";
@@ -515,11 +512,6 @@ int main() {
                     changeBtn->callbackData = "change_send";
                     confirmKeyboard->inlineKeyboard.push_back({ confirmBtn, changeBtn });
                     bot.getApi().sendMessage(chatId, confirmationText, nullptr, 0, confirmKeyboard);
-                } else {
-                    bot.getApi().sendMessage(chatId, "Пользователь " + data.getPayer() + " не найден.");
-                    print_functions(bot, message);
-                    requestMoneyDataMap.erase(chatId);
-                }
             }
             else if (data.getState() == RequestMoneyData::WaitingForDetails) {
                 data.setPaymentDetails(text);
