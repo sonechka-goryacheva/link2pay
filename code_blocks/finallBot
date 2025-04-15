@@ -1,0 +1,1099 @@
+#include <algorithm>
+#include <cctype>
+#include <curl/curl.h>
+#include <iomanip>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <optional>
+#include <pqxx/pqxx>
+#include <random>
+#include <set>
+#include <sstream>
+#include <string>
+#include <tgbot/tgbot.h>
+#include <vector>
+
+using namespace std;
+using namespace TgBot;
+
+class LinkRequest {
+private:
+  double transferAmount;
+  string message;
+  string recipientRequisites;
+
+public:
+  LinkRequest()
+      : transferAmount(0.0), message("noMessage"),
+        recipientRequisites("default_requisites") {}
+
+  double getTransferAmount() const { return transferAmount; }
+  string getMessage() const { return message; }
+  string getSenderRequisites() const { return recipientRequisites; }
+
+  void setTransferAmount(double newTransferAmount) {
+    transferAmount = newTransferAmount;
+  }
+  void setMessage(const string &newMessage) { message = newMessage; }
+  void setSenderRequisites(const string &newRequisites) {
+    recipientRequisites = newRequisites;
+  }
+};
+
+class UserData {
+private:
+  string phoneNumber;
+  string userTag;
+  string userName;
+  int64_t user_id;
+
+public:
+  UserData()
+      : phoneNumber("no number"), userTag("no tag"), userName("no username"),
+        user_id(0) {}
+
+  // Геттеры
+  int64_t getUserId() const { return user_id; }
+  string getPhoneNumber() const { return phoneNumber; }
+  string getUserTag() const { return userTag; }
+  string getUserName() const { return userName; }
+
+  // Сеттеры
+  void setUserId(int64_t id) { user_id = id; }
+  void setPhoneNumber(const string &newPhoneNumber) {
+    phoneNumber = newPhoneNumber;
+  }
+  void setUserTag(const string &newUserTag) { userTag = newUserTag; }
+  void setUserName(const string &newUserName) { userName = newUserName; }
+
+  void printUSData() const {
+    cout << "User ID: " << user_id << "\nPhone: " << phoneNumber
+         << "\nTag: " << userTag << "\nName: " << userName << endl;
+  }
+};
+
+class Database {
+private:
+  std::string conn_string;
+
+public:
+Database(const std::string &host, const std::string &dbname,
+  const std::string &user, const std::string &password)
+: conn_string("host=" + host + " port=54321 dbname=" + dbname + " user=" + user +
+         " password=" + password) {}
+  // Проверка регистрации пользователя
+  bool isUserRegistered(int64_t chat_id) {
+    try {
+      pqxx::connection conn(conn_string);
+      pqxx::work txn(conn);
+      pqxx::result res = txn.exec("SELECT 1 FROM users WHERE chat_id = " +
+                                  std::to_string(chat_id));
+      return !res.empty();
+    } catch (const std::exception &e) {
+      std::cerr << "Database error: " << e.what() << std::endl;
+      return false;
+    }
+  }
+
+  // Получение данных пользователя
+  std::optional<UserData> getUserData(int64_t chat_id) {
+    try {
+      pqxx::connection conn(conn_string);
+      pqxx::work txn(conn);
+      pqxx::result res =
+          txn.exec("SELECT username, name, phone FROM users WHERE chat_id = " +
+                   std::to_string(chat_id));
+
+      if (!res.empty()) {
+        UserData user;
+        user.setUserId(chat_id);
+        user.setUserTag(res[0]["username"].as<std::string>());
+        user.setUserName(res[0]["name"].as<std::string>());
+        user.setPhoneNumber(res[0]["phone"].as<std::string>());
+        return user;
+      }
+    } catch (const std::exception &e) {
+      std::cerr << "Database error: " << e.what() << std::endl;
+    }
+    return std::nullopt;
+  }
+
+  // Сохранение пользователя
+  void saveUser(const UserData &user) {
+    try {
+      pqxx::connection conn(conn_string);
+      pqxx::work txn(conn);
+
+      std::string query = "INSERT INTO users (chat_id, username, name, phone) "
+                          "VALUES (" +
+                          std::to_string(user.getUserId()) + ", " +
+                          txn.quote(user.getUserTag()) + ", " +
+                          txn.quote(user.getUserName()) + ", " +
+                          txn.quote(user.getPhoneNumber()) +
+                          ") "
+                          "ON CONFLICT (chat_id) DO UPDATE SET "
+                          "username = EXCLUDED.username, "
+                          "name = EXCLUDED.name, "
+                          "phone = EXCLUDED.phone";
+
+      txn.exec(query);
+      txn.commit();
+    } catch (const std::exception &e) {
+      throw std::runtime_error("Failed to save user: " + std::string(e.what()));
+    }
+  }
+  // Проверка регистрации по username (@nickname)
+  bool isUserRegisteredByUsername(const std::string &username) {
+    try {
+      pqxx::connection conn(conn_string);
+      pqxx::work txn(conn);
+      pqxx::result res = txn.exec("SELECT 1 FROM users WHERE username = " +
+                                  txn.quote(username));
+      return !res.empty();
+    } catch (const std::exception &e) {
+      std::cerr << "Database error: " << e.what() << std::endl;
+      return false;
+    }
+  }
+
+  // Получение chat_id по username
+  std::optional<int64_t> getChatIdByUsername(const std::string &username) {
+    try {
+      pqxx::connection conn(conn_string);
+      pqxx::work txn(conn);
+      pqxx::result res = txn.exec(
+          "SELECT chat_id FROM users WHERE username = " + txn.quote(username));
+      if (!res.empty()) {
+        return res[0]["chat_id"].as<int64_t>();
+      }
+    } catch (...) {
+      std::cerr << "Error getting chat_id" << std::endl;
+    }
+    return std::nullopt;
+  }
+};
+bool isValidPhoneNumber(const string &phoneNumber) {
+  if ((phoneNumber.find("+7") == 0 && phoneNumber.length() == 12) ||
+      (phoneNumber.find("8") == 0 && phoneNumber.length() == 11)) {
+    return true;
+  }
+  return false;
+}
+
+bool isValidPhoneNumberTGSend(const string &phoneNumber) {
+  if (phoneNumber.find("7") == 0 && phoneNumber.length() == 11) {
+    return true;
+  }
+  return false;
+}
+
+class TransferRequest {
+private:
+  int id;
+  string recipientTag;
+  string payerTag;
+  LinkRequest linkRequest;
+
+public:
+  TransferRequest()
+      : id(1), recipientTag("default_recipient"), payerTag("default_payer") {}
+
+  int getId() const { return id; }
+  string getPayerTag() const { return payerTag; }
+  string getRecipientTag() const { return recipientTag; }
+  LinkRequest getLinkRequest() const { return linkRequest; }
+
+  void setPayerTag(const string &newPayerTag) { payerTag = newPayerTag; }
+  void setRecipientTag(const string &newRecipientTag) {
+    recipientTag = newRecipientTag;
+  }
+  void setLinkRequest(const LinkRequest &newLinkRequest) {
+    linkRequest = newLinkRequest;
+  }
+
+  void printData() const {
+    cout << "ID: " << id << endl;
+    cout << "Тэг получателя: " << recipientTag << endl;
+    cout << "Тэг плательщика: " << payerTag << endl;
+    cout << "Сумма перевода: " << linkRequest.getTransferAmount() << endl;
+    cout << "Сообщение: " << linkRequest.getMessage() << endl;
+    cout << "Реквизиты счета получателя: " << linkRequest.getSenderRequisites()
+         << endl;
+  }
+};
+
+class RequestMoneyData {
+public:
+  enum State {
+    None,
+    WaitingForRecipient,
+    WaitingForAmount,
+    WaitingForMessage,
+    WaitingForConfirmation,
+    WaitingForDetails,
+    Completed
+  };
+
+  RequestMoneyData() : payer(""), state(None) {}
+
+  string getPayer() const { return payer; }
+  string getAmount() const { return amount; }
+  string getMessage() const { return message; }
+  string getPaymentDetails() const { return paymentDetails; }
+  State getState() const { return state; }
+
+  void setPayer(const string &r) { payer = r; }
+  void setAmount(const string &a) { amount = a; }
+  void setMessage(const string &m) { message = m; }
+  void setState(State s) { state = s; }
+  void setPaymentDetails(const string &p) { paymentDetails = p; }
+
+private:
+  string payer;
+  string amount;
+  string message;
+  string paymentDetails;
+  State state;
+};
+class SendMoneyData {
+public:
+  enum State {
+    None,
+    WaitingForRecipient,
+    WaitingForAmount,
+    WaitingForMessage,
+    WaitingForConfirmation,
+    WaitingForDetails,
+    Completed
+  };
+
+  SendMoneyData() : recipient("@murkece"), state(None) {}
+
+  string getRecipient() const { return recipient; }
+  string getAmount() const { return amount; }
+  string getMessage() const { return message; }
+  string getPaymentDetails() const { return paymentDetails; }
+  State getState() const { return state; }
+
+  void setRecipient(const string &r) { recipient = r; }
+  void setAmount(const string &a) { amount = a; }
+  void setMessage(const string &m) { message = m; }
+  void setState(State s) { state = s; }
+  void setPaymentDetails(const string &p) { paymentDetails = p; }
+
+private:
+  string recipient;
+  string amount;
+  string message;
+  string paymentDetails;
+  State state;
+};
+
+class Metadata {
+private:
+  int64_t chat_id;
+  string phone_number;
+
+public:
+  Metadata() = default;
+  Metadata(int64_t cid, const string &pn) : chat_id(cid), phone_number(pn) {}
+
+  int64_t getChatId() const { return chat_id; }
+  string getPhoneNumber() const { return phone_number; }
+
+  bool operator<(const Metadata &other) const {
+    return tie(chat_id, phone_number) < tie(other.chat_id, other.phone_number);
+  }
+};
+
+// Глобальные переменные
+map<int64_t, SendMoneyData> sendMoneyDataMap;
+map<int64_t, RequestMoneyData> requestMoneyDataMap;
+map<string, Metadata> tg_id;
+map<int64_t, string> id_tg;
+map<int64_t, string> userStates;
+map<string, string> paymentDetailsMap;
+set<int64_t> interactedUsers;
+
+const std::string dot_string = ".";
+const std::string at_string = "@";
+const std::string space_str = " ";
+constexpr const char dot_char = '.';
+
+bool isRegistered(int64_t chatId) {
+  return paymentDetailsMap.find(to_string(chatId)) != paymentDetailsMap.end();
+}
+
+void requestPaymentDetails(Bot &bot, int64_t chatId) {
+  bot.getApi().sendMessage(chatId, "Введите реквизиты для перевода:");
+  requestMoneyDataMap[chatId].setState(RequestMoneyData::WaitingForDetails);
+}
+
+void confirmPayment(Bot &bot, int64_t chatId) {
+  RequestMoneyData &data = requestMoneyDataMap[chatId];
+  string confirmationText = "Подтвердите перевод:\n";
+  confirmationText += "Плательщик: " + data.getPayer() + "\n";
+  confirmationText += "Сумма: " + data.getAmount() + "\n";
+  confirmationText += "Реквизиты: " + data.getPaymentDetails() + "\n";
+
+  InlineKeyboardMarkup::Ptr keyboard(new InlineKeyboardMarkup);
+  InlineKeyboardButton::Ptr confirmBtn(new InlineKeyboardButton);
+  confirmBtn->text = "Подтвердить";
+  confirmBtn->callbackData = "confirm_send";
+  InlineKeyboardButton::Ptr changeBtn(new InlineKeyboardButton);
+  changeBtn->text = "Изменить";
+  changeBtn->callbackData = "change_send";
+  keyboard->inlineKeyboard.push_back({confirmBtn, changeBtn});
+
+  bot.getApi().sendMessage(chatId, confirmationText, nullptr, 0, keyboard);
+}
+
+void print_functions(const Bot &bot, Message::Ptr message) {
+  InlineKeyboardMarkup::Ptr keyboard(new InlineKeyboardMarkup);
+
+  InlineKeyboardButton::Ptr sendMoneyBtn(new InlineKeyboardButton);
+  sendMoneyBtn->text = "Отправить деньги";
+  sendMoneyBtn->callbackData = "send_money";
+
+  InlineKeyboardButton::Ptr requestMoneyBtn(new InlineKeyboardButton);
+  requestMoneyBtn->text = "Запросить деньги";
+  requestMoneyBtn->callbackData = "request_money";
+
+  keyboard->inlineKeyboard.push_back({sendMoneyBtn, requestMoneyBtn});
+
+  bot.getApi().sendMessage(message->chat->id, "Выберите операцию:", nullptr, 0,
+                           keyboard);
+}
+
+string urlEncode(const string &value) {
+  ostringstream escaped;
+  escaped.fill('0');
+  escaped << hex;
+  for (char c : value) {
+    if (isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' ||
+        c == '.' || c == '~') {
+      escaped << c;
+    } else {
+      escaped << '%' << setw(2) << int((unsigned char)c);
+    }
+  }
+  return escaped.str();
+}
+
+string generatePaymentLink(const string &recipient, const string &amount,
+                           const string &paymentDetails) {
+  // Базовый URL вашего платежного шлюза
+  string baseUrl = "https://your-payment-gateway.com/create_payment";
+  string link = baseUrl + "?recipient=" + urlEncode(recipient) +
+                "&amount=" + urlEncode(amount) +
+                "&details=" + urlEncode(paymentDetails);
+  return link;
+}
+
+void confirm_send_function(int64_t chatId, const Bot &bot,
+                           CallbackQuery::Ptr query) {
+  if (sendMoneyDataMap.find(chatId) != sendMoneyDataMap.end()) {
+    SendMoneyData &data = sendMoneyDataMap[chatId];
+    // Если пользователь получателя зарегистрирован в системе
+
+    if (tg_id.find(data.getRecipient()) != tg_id.end()) {
+      // Создаем объект запроса на перевод и заполняем его данными
+      TransferRequest transferSend;
+      transferSend.setPayerTag(id_tg[chatId]);
+      transferSend.setRecipientTag(data.getRecipient());
+      LinkRequest lr;
+      // Преобразуем сумму в double (при необходимости, можно добавить обработку
+      // ошибок)
+      lr.setTransferAmount(stod(data.getAmount()));
+      lr.setMessage(data.getMessage());
+      lr.setSenderRequisites(data.getPaymentDetails());
+      transferSend.setLinkRequest(lr);
+
+      // Формируем ссылку на оплату
+      string paymentLink = generatePaymentLink(
+          data.getRecipient(), data.getAmount(), data.getPaymentDetails());
+      bot.getApi().sendMessage(
+          chatId, "Данные подтверждены! Ссылка на перевод денежных средств: " +
+                      paymentLink);
+      bot.getApi().sendMessage(chatId, "Скоро эта ссылка станет рабочей!");
+
+      print_functions(bot, query->message);
+
+      // Отправляем уведомление получателю
+      string sendMsg = "Вам поступил перевод денежных средств на сумму " +
+                       data.getAmount() + " от " + id_tg[chatId];
+      if (!data.getMessage().empty()) {
+        sendMsg += "\nСообщение: " + data.getMessage();
+      }
+      bot.getApi().sendMessage(tg_id[data.getRecipient()].getChatId(), sendMsg);
+      bot.getApi().deleteMessage(query->message->chat->id,
+                                 query->message->messageId);
+    } else {
+      bot.getApi().sendMessage(chatId, "Пользователь " + data.getRecipient() +
+                                           " не найден.");
+      print_functions(bot, query->message);
+      bot.getApi().deleteMessage(query->message->chat->id,
+                                 query->message->messageId);
+    }
+  }
+}
+
+vector<string> extractUsernames(const string &text) {
+  vector<string> usernames;
+  size_t pos = 0;
+  while (pos < text.length()) {
+    pos = text.find('@', pos);
+    if (pos == string::npos)
+      break;
+
+    size_t end = text.find_first_of(" ,.!?\n", pos + 1);
+    if (end == string::npos)
+      end = text.length();
+
+    string username = text.substr(pos, end - pos);
+    if (!username.empty()) {
+      usernames.push_back(username);
+    }
+    pos = end;
+  }
+  return usernames;
+}
+void confirmPaymentSend(Bot &bot, int64_t chatId) {
+  SendMoneyData &data = sendMoneyDataMap[chatId];
+  string confirmationText = "Подтвердите перевод:\n";
+  confirmationText += "Получатель: " + data.getRecipient() + "\n";
+  confirmationText += "Сумма: " + data.getAmount() + "\n";
+  confirmationText += "Реквизиты: " + data.getPaymentDetails() + "\n";
+
+  InlineKeyboardMarkup::Ptr keyboard(new InlineKeyboardMarkup);
+  InlineKeyboardButton::Ptr confirmBtn(new InlineKeyboardButton);
+  confirmBtn->text = "Подтвердить";
+  confirmBtn->callbackData = "confirm_send_send";
+  InlineKeyboardButton::Ptr changeBtn(new InlineKeyboardButton);
+  changeBtn->text = "Изменить";
+  changeBtn->callbackData = "change_send_send";
+  keyboard->inlineKeyboard.push_back({confirmBtn});
+
+  bot.getApi().sendMessage(chatId, confirmationText, nullptr, nullptr,
+                           keyboard);
+}
+
+int main() {
+  Bot bot("");
+  // Настройки подключения к БД (ЗАМЕНИТЕ НА СВОИ!)
+  Database db(
+      "", // host (если PostgreSQL на Windows, укажите IP)
+      "",         // название базы
+      "",         // пользователь
+      ""); // пароль
+  map<int64_t, UserData> users;
+
+  bot.getEvents().onCommand("start", [&bot, &users](Message::Ptr message) {
+    if (message) {
+      if (!isRegistered(message->chat->id)) {
+        auto keyboard = make_shared<ReplyKeyboardMarkup>();
+        KeyboardButton::Ptr button(new KeyboardButton);
+        button->text = "Отправить данные";
+        button->requestContact = true;
+        vector<KeyboardButton::Ptr> row = {button};
+        keyboard->keyboard.push_back(row);
+        bot.getApi().sendMessage(
+            message->chat->id,
+            "Добро пожаловать в Link2Pay!\n\nЧтобы продолжить, необходимо дать "
+            "согласие на обработку персональных данных.",
+            nullptr, 0, keyboard);
+      } else {
+        print_functions(bot, message);
+      }
+    }
+  });
+
+  bot.getEvents().onCallbackQuery([&bot, &users,
+                                   &db](CallbackQuery::Ptr query) {
+    int64_t chatId = query->message->chat->id;
+    if (query->data == "send_money") {
+      // Инициализируем процесс отправки денег для данного пользователя
+      sendMoneyDataMap[chatId] = SendMoneyData();
+      sendMoneyDataMap[chatId].setState(SendMoneyData::WaitingForRecipient);
+      bot.getApi().sendMessage(chatId,
+                               "Введите имя получателя (например, @username):");
+      if (query->message->text.empty() || query->message->text[0] == '/')
+        return;
+      bot.getApi().deleteMessage(query->message->chat->id,
+                                 query->message->messageId);
+    } else if (query->data == "no_message_send") {
+      if (sendMoneyDataMap.find(chatId) != sendMoneyDataMap.end() &&
+          sendMoneyDataMap[chatId].getState() ==
+              SendMoneyData::WaitingForMessage) {
+        sendMoneyDataMap[chatId].setMessage("");
+        sendMoneyDataMap[chatId].setState(
+            SendMoneyData::WaitingForConfirmation);
+        string confirmationText =
+            "Проверьте данные:\n\n" + string("Получатель: ") +
+            sendMoneyDataMap[chatId].getRecipient() + "\n" +
+            "Сумма: " + sendMoneyDataMap[chatId].getAmount();
+        InlineKeyboardMarkup::Ptr confirmKeyboard(new InlineKeyboardMarkup);
+        InlineKeyboardButton::Ptr confirmBtn(new InlineKeyboardButton);
+        confirmBtn->text = "Подтвердить";
+        confirmBtn->callbackData = "confirm_send_send";
+        InlineKeyboardButton::Ptr changeBtn(new InlineKeyboardButton);
+        changeBtn->text = "Изменить";
+        changeBtn->callbackData = "change_send_send";
+        confirmKeyboard->inlineKeyboard.push_back({confirmBtn, changeBtn});
+
+        bot.getApi().sendMessage(chatId, confirmationText, nullptr, nullptr,
+                                 confirmKeyboard);
+        bot.getApi().deleteMessage(query->message->chat->id,
+                                   query->message->messageId);
+      }
+    } else if (query->data == "confirm_send_send") {
+      // Пользователь подтверждает данные
+      if (sendMoneyDataMap.find(chatId) != sendMoneyDataMap.end()) {
+        SendMoneyData &data = sendMoneyDataMap[chatId];
+        // Если пользователь получателя зарегистрирован в системе
+        string username = data.getRecipient();
+
+        if (db.isUserRegisteredByUsername(username.substr(1))) {
+          auto chatIdOptSend = db.getChatIdByUsername(username.substr(1));
+
+          // Создаем объект запроса на перевод и заполняем его данными
+          TransferRequest transferSend;
+          transferSend.setPayerTag(id_tg[chatId]);
+          transferSend.setRecipientTag(data.getRecipient());
+          LinkRequest lr;
+          // Преобразуем сумму в double (при необходимости, можно добавить
+          // обработку ошибок)
+          lr.setTransferAmount(stod(data.getAmount()));
+          lr.setMessage(data.getMessage());
+          lr.setSenderRequisites(data.getPaymentDetails());
+          transferSend.setLinkRequest(lr);
+
+          // Формируем ссылку на оплату
+          string paymentLink = generatePaymentLink(
+              data.getRecipient(), data.getAmount(), data.getPaymentDetails());
+          bot.getApi().sendMessage(
+              chatId,
+              "Данные подтверждены! Ссылка на перевод денежных средств: " +
+                  paymentLink);
+
+          bot.getApi().sendMessage(chatId, "Скоро эта ссылка станет рабочей!");
+          print_functions(bot, query->message);
+
+          // Отправляем уведомление получателю
+          string sendMsg = "Вам поступил перевод денежных средств на сумму " +
+                           data.getAmount() + " от @" +
+                           query->message->chat->username;
+          if (!data.getMessage().empty()) {
+            sendMsg += "\nСообщение: " + data.getMessage();
+          }
+          bot.getApi().sendMessage(*chatIdOptSend, sendMsg);
+          bot.getApi().deleteMessage(query->message->chat->id,
+                                     query->message->messageId);
+        } else {
+          bot.getApi().sendMessage(
+              chatId, "Пользователь " + data.getRecipient() + " не найден.");
+          print_functions(bot, query->message);
+          bot.getApi().deleteMessage(query->message->chat->id,
+                                     query->message->messageId);
+        }
+      }
+      sendMoneyDataMap.erase(chatId);
+    } else if (query->data == "change_send_send") {
+      // Отмена и повторный ввод данных
+      sendMoneyDataMap.erase(chatId);
+      bot.getApi().sendMessage(chatId, "Отправка отменена. Введите заново имя "
+                                       "получателя (например, @username):");
+      sendMoneyDataMap[chatId] = SendMoneyData();
+      sendMoneyDataMap[chatId].setState(SendMoneyData::WaitingForRecipient);
+    } else if (query->data == "request_money") {
+      requestMoneyDataMap[chatId] = RequestMoneyData();
+      requestMoneyDataMap[chatId].setState(
+          RequestMoneyData::WaitingForRecipient);
+      bot.getApi().sendMessage(
+          chatId, "Введите тэг плательщика/ов (например, @username):");
+      bot.getApi().deleteMessage(query->message->chat->id,
+                                 query->message->messageId);
+    } else if (query->data == "no_message") {
+      if (requestMoneyDataMap.find(chatId) != requestMoneyDataMap.end() &&
+          requestMoneyDataMap[chatId].getState() ==
+              RequestMoneyData::WaitingForMessage) {
+        requestMoneyDataMap[chatId].setMessage("");
+        requestMoneyDataMap[chatId].setState(
+            RequestMoneyData::WaitingForConfirmation);
+
+        string confirmationText =
+            "Проверьте данные:\n\n" + string("Плательщик: ") +
+            requestMoneyDataMap[chatId].getPayer() + "\n" +
+            "Сумма: " + requestMoneyDataMap[chatId].getAmount();
+
+        auto confirmKeyboard = make_shared<InlineKeyboardMarkup>();
+        InlineKeyboardButton::Ptr confirmBtn(new InlineKeyboardButton);
+        confirmBtn->text = "Подтвердить";
+        confirmBtn->callbackData = "confirm_send";
+        InlineKeyboardButton::Ptr changeBtn(new InlineKeyboardButton);
+        changeBtn->text = "Изменить";
+        changeBtn->callbackData = "change_send";
+        confirmKeyboard->inlineKeyboard.push_back({confirmBtn, changeBtn});
+
+        bot.getApi().sendMessage(chatId, confirmationText, nullptr, 0,
+                                 confirmKeyboard);
+        bot.getApi().deleteMessage(query->message->chat->id,
+                                   query->message->messageId);
+      }
+    } else if (query->data == "confirm_send") {
+      if (requestMoneyDataMap.find(chatId) != requestMoneyDataMap.end()) {
+        RequestMoneyData &data = requestMoneyDataMap[chatId];
+        vector<string> payers;
+        string responseMessage;
+        string paymentLink = generatePaymentLink(
+            data.getPayer(), data.getAmount(), data.getPaymentDetails());
+        // Извлекаем всех упомянутых пользователей из сообщения
+        vector<string> usernames = extractUsernames(data.getPayer());
+
+        if (usernames.empty()) {
+          // Обработка одиночного получателя
+          string username = data.getPayer();
+          if (username.empty() || username[0] != '@') {
+            bot.getApi().sendMessage(
+                chatId, "Некорректный формат username. Должен начинаться с @");
+            return;
+          }
+
+          // Проверяем регистрацию через базу данных
+          if (db.isUserRegisteredByUsername(username.substr(1))) { // убираем @
+            auto chatIdOpt = db.getChatIdByUsername(username.substr(1));
+            if (chatIdOpt) {
+              string payerMsg = "Вам поступил запрос на перевод от @" +
+                                query->message->chat->username + ":\n" +
+                                "Сумма: " + data.getAmount() + "\n";
+
+              if (!data.getMessage().empty()) {
+                payerMsg += "Сообщение: " + data.getMessage() + "\n";
+                payerMsg += "\nСсылка для перевода: " + paymentLink;
+              }
+
+              try {
+                bot.getApi().sendMessage(*chatIdOpt, payerMsg);
+                responseMessage =
+                    "Запрос на перевод отправлен пользователю " + username;
+              } catch (const exception &e) {
+                responseMessage =
+                    "Ошибка при отправке запроса: " + string(e.what());
+              }
+            } else {
+              responseMessage =
+                  "Не удалось получить chat_id пользователя " + username;
+            }
+          } else {
+            responseMessage = "Пользователь " + username +
+                              " не зарегистрирован в системе.\n"
+                              "Вы можете отправить ссылку на платёж: " +
+                              paymentLink;
+          }
+        } else {
+          // Обработка нескольких получателей
+          vector<string> successPayers;
+          vector<string> failedPayers;
+          vector<string> unregisteredPayers;
+          bool anyUnregistered = false;
+
+          for (const string &username : usernames) {
+            if (db.isUserRegisteredByUsername(username.substr(1))) {
+              auto chatIdOpt = db.getChatIdByUsername(username.substr(1));
+              if (chatIdOpt) {
+                string payerMsg = "Вам поступил запрос на перевод от @" +
+                                  query->message->chat->username + ":\n" +
+                                  "Сумма: " + data.getAmount() + "\n";
+
+                if (!data.getMessage().empty()) {
+                  payerMsg += "Сообщение: " + data.getMessage() + "\n";
+                  payerMsg += "\nСсылка для перевода: " + paymentLink;
+                }
+
+                try {
+                  bot.getApi().sendMessage(*chatIdOpt, payerMsg);
+                  successPayers.push_back(username);
+                } catch (...) {
+                  failedPayers.push_back(username + " (ошибка отправки)");
+                }
+              } else {
+                failedPayers.push_back(username +
+                                       " (не удалось получить chat_id)");
+              }
+            } else {
+              unregisteredPayers.push_back(username + " (не зарегистрирован)");
+              anyUnregistered = true;
+            }
+          }
+
+          // Формируем итоговое сообщение
+          if (!successPayers.empty()) {
+            responseMessage = "Запросы отправлены следующим пользователям:\n";
+            for (const string &user : successPayers) {
+              responseMessage += "- " + user + "\n";
+            }
+          }
+
+          if (!unregisteredPayers.empty()) {
+            if (!responseMessage.empty())
+              responseMessage += "\n";
+            responseMessage += "Следующие пользователи не зарегистрированы:\n";
+            for (const string &user : unregisteredPayers) {
+              responseMessage += "- " + user + "\n";
+            }
+          }
+
+          if (!failedPayers.empty()) {
+            if (!responseMessage.empty())
+              responseMessage += "\n";
+            responseMessage += "Ошибки при отправке:\n";
+            for (const string &user : failedPayers) {
+              responseMessage += "- " + user + "\n";
+            }
+          }
+          if (responseMessage.empty()) {
+            responseMessage = "Не удалось отправить запросы ни одному из "
+                              "указанных пользователей.";
+          }
+
+          // Если есть незарегистрированные - добавляем ссылку
+          if (anyUnregistered) {
+            responseMessage += "\nДля незарегистрированных пользователей вы "
+                               "можете отправить ссылку на платёж: " +
+                               paymentLink;
+          }
+          bot.getApi().sendMessage(chatId, responseMessage);
+          requestMoneyDataMap.erase(chatId);
+          bot.getApi().deleteMessage(query->message->chat->id,
+                                     query->message->messageId);
+          print_functions(bot, query->message);
+        }
+      }
+    } else if (query->data == "change_send") {
+      requestMoneyDataMap.erase(chatId);
+      bot.getApi().sendMessage(chatId, "Отправка отменена. Введите заново имя "
+                                       "плательщика/ов (например, @username):");
+      requestMoneyDataMap[chatId] = RequestMoneyData();
+      requestMoneyDataMap[chatId].setState(
+          RequestMoneyData::WaitingForRecipient);
+    } else if (query->data.find("confirm_phone:") == 0) {
+      if (users.find(query->message->chat->id) == users.end()) {
+        bot.getApi().answerCallbackQuery(query->id,
+                                         "Ошибка: данные не найдены!");
+        return;
+      }
+
+      UserData &userData = users[query->message->chat->id];
+      if (userData.getPhoneNumber().empty()) {
+        bot.getApi().answerCallbackQuery(query->id, "Ошибка: номер не указан!");
+        return;
+      }
+
+      try {
+        db.saveUser(userData);
+        users.erase(query->message->chat->id);
+        bot.getApi().editMessageText(
+            "✅ Регистрация завершена!\nВаши данные сохранены.",
+            query->message->chat->id, query->message->messageId);
+      } catch (const exception &e) {
+        cerr << "Error saving user: " << e.what() << endl;
+      }
+      print_functions(bot, query->message);
+    } else if (query->data == "request_manual_phone") {
+      bot.getApi().sendMessage(
+          query->message->chat->id,
+          "Пожалуйста, введите ваш номер телефона вручную:");
+      bot.getApi().answerCallbackQuery(query->id,
+                                       "Введите номер телефона вручную.");
+    }
+    bot.getApi().answerCallbackQuery(query->id);
+  });
+
+  bot.getEvents().onAnyMessage([&bot, &users, &db](Message::Ptr message) {
+    if (!message)
+      return;
+    int64_t chatId = message->chat->id;
+    string text = message->text;
+    UserData &userData = users[message->chat->id];
+    userData.setUserId(message->chat->id);
+
+    if (sendMoneyDataMap.find(chatId) != sendMoneyDataMap.end()) {
+      SendMoneyData &data = sendMoneyDataMap[chatId];
+      if (data.getState() == SendMoneyData::WaitingForRecipient) {
+        if (text.empty() || text[0] != '@') {
+          bot.getApi().sendMessage(
+              chatId,
+              "Некорректный ввод. Введите имя получателя, начиная с '@'.");
+          return;
+        }
+        data.setRecipient(text);
+        data.setState(SendMoneyData::WaitingForAmount);
+        bot.getApi().sendMessage(chatId, "Введите сумму перевода:");
+      } else if (data.getState() == SendMoneyData::WaitingForAmount) {
+        int count_dots = count(text.begin(), text.end(), dot_char);
+        if (count_dots > 1) {
+          bot.getApi().sendMessage(chatId,
+                                   "Некорректная сумма! Повторите ввод суммы:");
+          return;
+        }
+        bool is_money_correct = true;
+        auto rub = text.substr(0, text.find(dot_string));
+        if (rub.empty()) {
+          is_money_correct = false;
+        } else {
+          if (count_dots == 1) {
+            auto kop = (text.substr(text.find(dot_string) + 1));
+            if (kop.size() > 2 || (kop.empty() && count_dots == 1)) {
+              is_money_correct = false;
+            }
+          }
+          if (is_money_correct) {
+            for (const auto &c : text) {
+              if (c != dot_char) {
+                if (c < '0' || c > '9') {
+                  is_money_correct = false;
+                  break;
+                }
+              }
+            }
+          }
+        }
+        if (!is_money_correct || text.empty()) {
+          bot.getApi().sendMessage(chatId,
+                                   "Некорректная сумма! Повторите ввод суммы:");
+          return;
+        }
+        data.setAmount(text);
+        data.setState(SendMoneyData::WaitingForMessage);
+        InlineKeyboardMarkup::Ptr noMsgKeyboard(new InlineKeyboardMarkup);
+        InlineKeyboardButton::Ptr noMsgBtn(new InlineKeyboardButton);
+        noMsgBtn->text = "Без сообщения";
+        noMsgBtn->callbackData = "no_message_send";
+        noMsgKeyboard->inlineKeyboard.push_back({noMsgBtn});
+        bot.getApi().sendMessage(
+            chatId,
+            "Введите сообщение к запросу или нажмите кнопку «Без сообщения»:",
+            nullptr, nullptr, noMsgKeyboard);
+      } else if (data.getState() == SendMoneyData::WaitingForMessage) {
+        data.setMessage(text);
+        // Проверяем наличие получателя в системе
+        SendMoneyData &data = sendMoneyDataMap[chatId];
+        // Если пользователь получателя зарегистрирован в системе
+        string username = data.getRecipient();
+        if (db.isUserRegisteredByUsername(username.substr(1))) {
+          data.setState(SendMoneyData::WaitingForConfirmation);
+          string confirmationText =
+              "Проверьте данные:\n\n" + string("Получатель: ") +
+              data.getRecipient() + "\n" + "Сумма: " + data.getAmount();
+          if (!data.getMessage().empty()) {
+            confirmationText += "\nСообщение: " + data.getMessage();
+          }
+          InlineKeyboardMarkup::Ptr confirmKeyboard(new InlineKeyboardMarkup);
+          InlineKeyboardButton::Ptr confirmBtn(new InlineKeyboardButton);
+          confirmBtn->text = "Подтвердить";
+          confirmBtn->callbackData = "confirm_send_send";
+          InlineKeyboardButton::Ptr changeBtn(new InlineKeyboardButton);
+          changeBtn->text = "Изменить";
+          changeBtn->callbackData = "change_send_send";
+          confirmKeyboard->inlineKeyboard.push_back({confirmBtn, changeBtn});
+          bot.getApi().sendMessage(chatId, confirmationText, nullptr, nullptr,
+                                   confirmKeyboard);
+        } else {
+          bot.getApi().sendMessage(
+              chatId, "Пользователь " + data.getRecipient() + " не найден.");
+          print_functions(bot, message);
+          sendMoneyDataMap.erase(chatId);
+        }
+      } else if (data.getState() == SendMoneyData::WaitingForDetails) {
+        data.setPaymentDetails(text);
+        confirmPaymentSend(bot, chatId);
+      }
+      return;
+    }
+    // Остальная обработка сообщений (переводы, регистрация и т.д.)
+    if (requestMoneyDataMap.find(chatId) != requestMoneyDataMap.end()) {
+      RequestMoneyData &data = requestMoneyDataMap[chatId];
+      if (data.getState() == RequestMoneyData::WaitingForRecipient) {
+        if (text.empty() || text[0] != '@') {
+          bot.getApi().sendMessage(chatId, "Некорректный ввод. Введите имя "
+                                           "плательщика/ов, начиная с '@'.");
+          return;
+        }
+        data.setPayer(text);
+        data.setState(RequestMoneyData::WaitingForAmount);
+        bot.getApi().sendMessage(chatId, "Введите сумму перевода:");
+      } else if (data.getState() == RequestMoneyData::WaitingForAmount) {
+        int count_dots = count(text.begin(), text.end(), '.');
+        if (count_dots > 1) {
+          bot.getApi().sendMessage(chatId,
+                                   "Некорректная сумма! Повторите ввод суммы:");
+          return;
+        }
+        bool is_money_correct = true;
+        auto rub = text.substr(0, text.find("."));
+        if (rub.empty()) {
+          is_money_correct = false;
+        } else {
+          if (count_dots == 1) {
+            auto kop = (text.substr(text.find(".") + 1));
+            if (kop.size() > 2 || (kop.empty() && count_dots == 1)) {
+              is_money_correct = false;
+            }
+          }
+          if (is_money_correct) {
+            for (const auto &c : text) {
+              if (c != '.') {
+                if ((c < '0' || c > '9') || (c == '0' && rub.size() == 1)) {
+                  is_money_correct = false;
+                  break;
+                }
+              }
+            }
+          }
+        }
+        if (!is_money_correct || text.empty()) {
+          bot.getApi().sendMessage(chatId,
+                                   "Некорректная сумма! Повторите ввод суммы:");
+          return;
+        }
+        data.setAmount(text);
+        data.setState(RequestMoneyData::WaitingForMessage);
+        InlineKeyboardMarkup::Ptr noMsgKeyboard(new InlineKeyboardMarkup);
+        InlineKeyboardButton::Ptr noMsgBtn(new InlineKeyboardButton);
+        noMsgBtn->text = "Без сообщения";
+        noMsgBtn->callbackData = "no_message";
+        noMsgKeyboard->inlineKeyboard.push_back({noMsgBtn});
+        bot.getApi().sendMessage(
+            chatId,
+            "Введите сообщение к запросу или нажмите кнопку «Без сообщения»:",
+            nullptr, nullptr, noMsgKeyboard);
+      } else if (data.getState() == RequestMoneyData::WaitingForMessage) {
+        data.setMessage(text);
+        data.setState(RequestMoneyData::WaitingForConfirmation);
+        string confirmationText = "Проверьте данные:\n\n" +
+                                  string("Плательщик: ") + data.getPayer() +
+                                  "\n" + "Сумма: " + data.getAmount();
+
+        confirmationText += "\nСообщение: " + data.getMessage();
+
+        auto confirmKeyboard = make_shared<InlineKeyboardMarkup>();
+        InlineKeyboardButton::Ptr confirmBtn(new InlineKeyboardButton);
+        confirmBtn->text = "Подтвердить";
+        confirmBtn->callbackData = "confirm_send";
+        InlineKeyboardButton::Ptr changeBtn(new InlineKeyboardButton);
+        changeBtn->text = "Изменить";
+        changeBtn->callbackData = "change_send";
+        confirmKeyboard->inlineKeyboard.push_back({confirmBtn, changeBtn});
+        bot.getApi().sendMessage(chatId, confirmationText, nullptr, 0,
+                                 confirmKeyboard);
+
+      } else if (data.getState() == RequestMoneyData::WaitingForDetails) {
+        data.setPaymentDetails(text);
+        confirmPayment(bot, chatId);
+      }
+      return;
+    }
+
+    // Обработка регистрации
+    if (!isRegistered(chatId)) {
+      if (StringTools::startsWith(text, "/start")) {
+        return;
+      }
+
+      if (message->contact != nullptr) {
+        string phoneNumber = message->contact->phoneNumber;
+        if (isValidPhoneNumberTGSend(phoneNumber)) {
+          userData.setPhoneNumber(phoneNumber);
+
+          auto inlineKeyboard = make_shared<InlineKeyboardMarkup>();
+          InlineKeyboardButton::Ptr yesButton(new InlineKeyboardButton);
+          yesButton->text = "Да";
+          yesButton->callbackData =
+              "confirm_phone:" + userData.getPhoneNumber();
+
+          InlineKeyboardButton::Ptr noButton(new InlineKeyboardButton);
+          noButton->text = "Нет";
+          noButton->callbackData = "request_manual_phone";
+
+          vector<InlineKeyboardButton::Ptr> row = {yesButton, noButton};
+          inlineKeyboard->inlineKeyboard.push_back(row);
+
+          bot.getApi().sendMessage(
+              message->chat->id,
+              "Ваш счёт привязан к этому номеру телефона?: +" +
+                  userData.getPhoneNumber(),
+              nullptr, 0, inlineKeyboard);
+
+          userData.setUserTag("@" + message->from->username);
+          string name =
+              (message->chat->firstName) + " " + (message->chat->lastName);
+          userData.setUserName(name);
+        } else {
+          bot.getApi().sendMessage(message->chat->id,
+                                   "Номер телефона недействителен. Пожалуйста, "
+                                   "введите корректный номер телефона.");
+        }
+      } else if (message->text == "Да") {
+        tg_id[text.substr(0, text.find(" "))] =
+            Metadata{chatId, text.substr(text.find(" ") + 1)};
+        id_tg[chatId] = text.substr(0, text.find(" "));
+        bot.getApi().sendMessage(chatId, "Вы успешно зарегистрированы!");
+        bot.getApi().deleteMessage(message->chat->id, message->messageId);
+        print_functions(bot, message);
+      } else if (message->text == "Нет") {
+        bot.getApi().sendMessage(message->chat->id,
+                                 "Пожалуйста, введите новый номер телефона:");
+        bot.getApi().deleteMessage(message->chat->id, message->messageId);
+      } else {
+        string phoneNumber = message->text;
+        if (isValidPhoneNumber(phoneNumber)) {
+          userData.setPhoneNumber(phoneNumber);
+          auto inlineKeyboard = make_shared<InlineKeyboardMarkup>();
+          InlineKeyboardButton::Ptr yesButton(new InlineKeyboardButton);
+          yesButton->text = "Да";
+          yesButton->callbackData =
+              "confirm_phone:" + userData.getPhoneNumber();
+
+          InlineKeyboardButton::Ptr noButton(new InlineKeyboardButton);
+          noButton->text = "Нет";
+          noButton->callbackData = "request_manual_phone";
+
+          vector<InlineKeyboardButton::Ptr> row = {yesButton, noButton};
+          inlineKeyboard->inlineKeyboard.push_back(row);
+
+          bot.getApi().sendMessage(
+              message->chat->id,
+              "Ваш счёт привязан к этому номеру телефона?: " +
+                  userData.getPhoneNumber(),
+              nullptr, 0, inlineKeyboard);
+          userData.setUserTag("@" + message->from->username);
+          string name =
+              (message->chat->firstName) + " " + (message->chat->lastName);
+          userData.setUserName(name);
+        } else {
+          bot.getApi().sendMessage(message->chat->id,
+                                   "Номер телефона недействителен. Пожалуйста, "
+                                   "введите корректный номер телефона.");
+        }
+      }
+    }
+    // Обновление информации о пользователе
+    userData.setUserName(message->chat->firstName + " " +
+                         message->chat->lastName);
+    userData.setUserTag(message->from->username);
+  });
+
+  try {
+    printf("Bot username: %s\n", bot.getApi().getMe()->username.c_str());
+    TgLongPoll longPoll(bot);
+    while (true) {
+      printf("Long poll started\n");
+      longPoll.start();
+    }
+  } catch (TgException &e) {
+    printf("error: %s\n", e.what());
+  }
+
+  return 0;
+}
